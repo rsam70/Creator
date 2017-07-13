@@ -1,0 +1,185 @@
+﻿<#@ template debug="true" hostspecific="false" language="C#" #>
+<#@ assembly name="System.Core" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ output extension=".cs" #>
+using System;
+using System.Linq.Expressions;
+using System.Reflection;
+
+/// <summary>
+/// Contains a factory of creating types with public constructors. The constructor lambda
+/// is being created the first time and cached.
+///
+/// This package contains 2 versions being:
+/// - Creator.Create<T>(object a, object b, ...)
+/// - Creator.Create<T,A,B>(A a, B b)
+/// 
+/// </summary>
+namespace Rsam70.Utils.Factory
+{
+    /// <summary>
+    /// Delegate for executing a specfic constructor.
+    /// </summary>
+    public delegate T ObjectActivator<T>(params object[] args);
+
+    /// <summary>
+    /// Factory methods for creating dynamic objects, instead of using Activator.CreateInstance
+    /// </summary>
+    public static class Creator
+    {     
+        #region Cache and Creator functions
+        public static T Create<T>() 
+            where T:new() => new T();
+
+<#
+// creator template generation
+char beginTemplateCharData = 'A';
+char lastTemplateCharData  = 'H';
+
+List<char> templates = new List<char>();
+List<string> parameters = new List<string>();
+List<string> objparameters = new List<string>();
+List<string> parameterTypes = new List<string>();
+List<string> objParameterTypes = new List<string>();
+
+for (char c = beginTemplateCharData; c<=lastTemplateCharData; c++)
+{
+    templates.Add(c);
+    parameters.Add($"{c} {Char.ToLower(c)}");
+    parameterTypes.Add($"typeof({c})");
+    objparameters.Add($"object {Char.ToLower(c)}");
+    objParameterTypes.Add($"{Char.ToLower(c)}.GetType()");
+    
+    var strTemplates = string.Join(",", templates);
+    var strParams = strTemplates.ToLower();
+    var strParamsDecl = string.Join(",", parameters);
+    var strCachePostfix = string.Join("", templates);
+    var strParameterTypes = string.Join(",", parameterTypes);
+    var strObjParameters = string.Join(",", objparameters);
+    var strObjParameterTypes = string.Join(",", objParameterTypes);
+#>
+        public static T Create<T>(<#= strObjParameters #>)
+        {
+            var cache = new CacheObject<#=strCachePostfix#><T>();
+            return cache.Ctor(<#= strParams #>);
+        }
+
+        public struct CacheObject<#=strCachePostfix#><T>
+        {
+            private static ObjectActivator<T> ctorCache=null;
+
+            public T Ctor(<#= strObjParameters #>)
+            {
+                if (ctorCache==null)
+                {
+                    //Find the constructor
+                    var types = new Type[]{<#= strObjParameterTypes #>};
+                    var ctorInfo = GetConstructorInfo<T>(types);
+
+                    // create the constructor lamda
+                    ctorCache = GetActivator<T>(ctorInfo);
+                }
+                return ctorCache(<#= strParams #>);
+            }
+        }
+
+        public static T Create<T,<#= strTemplates #>>(<#= strParamsDecl #>)
+        {
+            var cache = new Cache<#=strCachePostfix#><T,<#= strTemplates #>>();
+            return cache.Ctor(<#= strParams #>);
+        }
+
+        public struct Cache<#=strCachePostfix#><T,<#= strTemplates #>>
+        {
+            private static ObjectActivator<T> ctorCache=null;
+
+            public T Ctor(<#=strParamsDecl#>)
+            {
+                if (ctorCache==null)
+                {
+                    //Find the constructor
+                    var types = new Type[]{<#= strParameterTypes #>};
+                    var ctorInfo = GetConstructorInfo<T>(types);
+
+                    // create the constructor lamda
+                    ctorCache = GetActivator<T>(ctorInfo);
+                }
+                return ctorCache(<#= strParams #>);
+            }
+        }
+
+<#
+}
+#>
+        #endregion // cache and creator public construction        
+        
+        #region Creator logic
+        /// <summary>
+        /// Get constructor info based on types.
+        /// </summary>
+        /// <param name="types"></param>
+        /// <returns></returns>
+        public static ConstructorInfo GetConstructorInfo<T>(Type[] types)
+        {            
+            var dataType = typeof(T);
+            ConstructorInfo constructorInfoObj = dataType.GetConstructor(
+                BindingFlags.Instance | BindingFlags.Public, null,
+                CallingConventions.HasThis, types, null);
+            if (constructorInfoObj == null)
+            {
+                throw new Exception($"Cannot find a valid constructor for type {dataType}");
+            }
+            return constructorInfoObj;
+        }
+
+        /// <summary>
+        /// Returns a lambda that constructs the type with given argument list
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="ctor"></param>
+        /// <returns></returns>
+        public static ObjectActivator<V> GetActivator<V> (ConstructorInfo ctor)
+        {
+            Type type = ctor.DeclaringType;
+            ParameterInfo[] paramsInfo = ctor.GetParameters();
+
+            //create a single param of type object[]
+            ParameterExpression param =
+                Expression.Parameter(typeof(object[]), "args");
+
+            Expression[] argsExp =
+                new Expression[paramsInfo.Length];
+
+            //pick each arg from the params array 
+            //and create a typed expression of them
+            for (int i = 0; i < paramsInfo.Length; i++)
+            {
+                Expression index = Expression.Constant(i);
+                Type paramType = paramsInfo[i].ParameterType;
+
+                Expression paramAccessorExp =
+                    Expression.ArrayIndex(param, index);
+
+                Expression paramCastExp =
+                    Expression.Convert(paramAccessorExp, paramType);
+
+                argsExp[i] = paramCastExp;
+            }
+
+            //make a NewExpression that calls the
+            //ctor with the args we just created
+            NewExpression newExp = Expression.New(ctor, argsExp);
+
+            //create a lambda with the New
+            //Expression as body and our param object[] as arg
+            LambdaExpression lambda =
+                Expression.Lambda(typeof(ObjectActivator<V>), newExp, param);
+
+            //compile it
+            return (ObjectActivator<V>)lambda.Compile();
+        }
+        #endregion
+    }
+}
